@@ -79,7 +79,7 @@
     panel.style.left = "18px";
     panel.style.bottom = "64px";
     panel.style.zIndex = "10001";
-    panel.style.maxWidth = "320px";
+    panel.style.maxWidth = "340px";
     panel.style.padding = "14px";
     panel.style.borderRadius = "18px";
     panel.style.background = "#ffffff";
@@ -90,11 +90,12 @@
 
     panel.innerHTML = `
       <div style="font-weight: 750; font-size: 14px; margin-bottom: 4px;">Connect live saving</div>
-      <div style="margin-bottom: 10px; color: #516070;">${message}</div>
+      <div data-live-signin-message style="margin-bottom: 10px; color: #516070;">${message}</div>
       <button type="button" data-live-signin-button style="border: 0; border-radius: 999px; background: #0f766e; color: white; cursor: pointer; font-weight: 750; padding: 9px 13px;">Sign in with Google</button>
     `;
 
     const button = panel.querySelector("[data-live-signin-button]");
+    const messageNode = panel.querySelector("[data-live-signin-message]");
     button.addEventListener("click", async () => {
       const service = getService();
       if (!service || !service.signIn) return;
@@ -109,6 +110,8 @@
         await connectLiveData();
       } catch (error) {
         console.error("AuditFlow sign-in failed", error);
+        const status = service.status?.();
+        messageNode.textContent = status?.message || "Google sign-in could not complete. Please try again.";
         button.disabled = false;
         button.textContent = "Try Google sign-in again";
         showLiveBadge("Google sign-in needed", "local");
@@ -204,6 +207,8 @@
       });
     } catch (error) {
       console.error("AuditFlow live connection failed", error);
+      const message = getService()?.status?.().message || "Live saving could not connect.";
+      showSignInPanel(message);
       showLiveBadge("Local demo mode", "local");
     } finally {
       connecting = false;
