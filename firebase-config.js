@@ -1,18 +1,17 @@
 // AuditFlow Firebase configuration
 // ------------------------------------------------------------
-// The Firebase project is connected, but live saving remains disabled
-// until Firestore security rules are selected and reviewed.
+// Live shared saving is enabled. Access is controlled in Firebase
+// Authentication and Firestore security rules, not by this public config file.
 //
-// To enable live shared saving safely:
-// 1. Enable Firestore Database in the Firebase console.
-// 2. Configure Authentication and Firestore security rules.
-// 3. Change enabled to true only after rules are ready.
+// Current first authorised Google account in Firestore rules:
+// - sao.anc.mlg@gmail.com
 //
-// Keep this repository public only for demo/sample data. Do not place
-// confidential audit data in a public repo or in an unsecured Firebase project.
+// Add the Internal Auditor, Senior Accounts Officer, Permanent Secretary,
+// and any other approved officers in Firestore rules before asking them to use
+// live shared data.
 
 window.AUDITFLOW_FIREBASE_CONFIG = {
-  enabled: false,
+  enabled: true,
   collections: {
     stateDocPath: "auditflow/state",
     auditLog: "auditflowAuditLog"
