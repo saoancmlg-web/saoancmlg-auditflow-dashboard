@@ -121,8 +121,8 @@
     if (code.includes("popup-closed-by-user")) {
       return "Google sign-in was cancelled before live saving connected.";
     }
-    if (code.includes("popup-blocked")) {
-      return "The browser blocked the Google sign-in popup. Redirect sign-in will be used instead.";
+    if (code.includes("unauthorized-domain")) {
+      return "This website domain is not authorised for Google sign-in yet.";
     }
     return `Firebase connection failed: ${error?.message || "Unknown error"}`;
   }
@@ -133,26 +133,9 @@
       return status();
     }
 
-    try {
-      const result = await state.modules.auth.signInWithPopup(
-        state.auth,
-        state.provider
-      );
-      state.user = result.user || state.auth.currentUser;
-      state.message = state.user
-        ? `Signed in as ${state.user.email || state.user.displayName || "Google user"}.`
-        : "Signed in with Google.";
-      return status();
-    } catch (error) {
-      if (error?.code?.includes("popup-blocked")) {
-        state.message = describeError(error);
-        await state.modules.auth.signInWithRedirect(state.auth, state.provider);
-        return status();
-      }
-
-      state.message = describeError(error);
-      throw error;
-    }
+    state.message = "Redirecting to Google sign-in...";
+    await state.modules.auth.signInWithRedirect(state.auth, state.provider);
+    return status();
   }
 
   async function init({ seedRecords = [], seedReportHistory = [] } = {}) {
