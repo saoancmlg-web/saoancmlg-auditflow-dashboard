@@ -10,6 +10,7 @@
 
   let liveReady = false;
   let applyingRemote = false;
+  let connecting = false;
   let saveTimer = 0;
 
   const getService = () => window.AuditFlowBackend;
@@ -65,6 +66,60 @@
     }
   }
 
+  function removeSignInPanel() {
+    document.querySelector("[data-live-signin-panel]")?.remove();
+  }
+
+  function showSignInPanel(message) {
+    const existing = document.querySelector("[data-live-signin-panel]");
+    const panel = existing || document.createElement("section");
+    panel.dataset.liveSigninPanel = "true";
+    panel.setAttribute("role", "status");
+    panel.style.position = "fixed";
+    panel.style.left = "18px";
+    panel.style.bottom = "64px";
+    panel.style.zIndex = "10001";
+    panel.style.maxWidth = "320px";
+    panel.style.padding = "14px";
+    panel.style.borderRadius = "18px";
+    panel.style.background = "#ffffff";
+    panel.style.border = "1px solid rgba(7, 95, 96, 0.18)";
+    panel.style.boxShadow = "0 18px 50px rgba(6, 40, 74, 0.22)";
+    panel.style.font = "500 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    panel.style.color = "#17324d";
+
+    panel.innerHTML = `
+      <div style="font-weight: 750; font-size: 14px; margin-bottom: 4px;">Connect live saving</div>
+      <div style="margin-bottom: 10px; color: #516070;">${message}</div>
+      <button type="button" data-live-signin-button style="border: 0; border-radius: 999px; background: #0f766e; color: white; cursor: pointer; font-weight: 750; padding: 9px 13px;">Sign in with Google</button>
+    `;
+
+    const button = panel.querySelector("[data-live-signin-button]");
+    button.addEventListener("click", async () => {
+      const service = getService();
+      if (!service || !service.signIn) return;
+
+      button.disabled = true;
+      button.textContent = "Opening Google sign-in...";
+      showLiveBadge("Google sign-in required", "local");
+
+      try {
+        await service.signIn();
+        button.textContent = "Connecting live data...";
+        await connectLiveData();
+      } catch (error) {
+        console.error("AuditFlow sign-in failed", error);
+        button.disabled = false;
+        button.textContent = "Try Google sign-in again";
+        showLiveBadge("Google sign-in needed", "local");
+      }
+    });
+
+    if (!existing) {
+      document.body.appendChild(panel);
+    }
+  }
+
   function scheduleRemoteSave(action) {
     if (!liveReady || applyingRemote || !getService()) return;
     window.clearTimeout(saveTimer);
@@ -117,25 +172,42 @@
   }
 
   async function connectLiveData() {
+    if (connecting) return;
     const service = getService();
     if (!service) return;
 
-    const status = await service.init({
-      seedRecords: currentRecords(),
-      seedReportHistory: currentReportHistory()
-    });
+    connecting = true;
 
-    if (!status.ready) {
+    try {
+      const status = await service.init({
+        seedRecords: currentRecords(),
+        seedReportHistory: currentReportHistory()
+      });
+
+      if (!status.ready) {
+        liveReady = false;
+        const message = status.message || "Live saving is not connected.";
+        showLiveBadge(status.mode === "signin" ? "Sign in for live saving" : "Local demo mode", "local");
+
+        if (status.mode === "signin") {
+          showSignInPanel(message);
+        }
+        return;
+      }
+
+      liveReady = true;
+      removeSignInPanel();
+      showLiveBadge("Live data connected", "live");
+      service.subscribe(applyRemoteState, (error) => {
+        console.error("AuditFlow live listener failed", error);
+        showLiveBadge("Live connection interrupted", "local");
+      });
+    } catch (error) {
+      console.error("AuditFlow live connection failed", error);
       showLiveBadge("Local demo mode", "local");
-      return;
+    } finally {
+      connecting = false;
     }
-
-    liveReady = true;
-    showLiveBadge("Live data connected", "live");
-    service.subscribe(applyRemoteState, (error) => {
-      console.error("AuditFlow live listener failed", error);
-      showLiveBadge("Live connection interrupted", "local");
-    });
   }
 
   if (document.readyState === "loading") {
