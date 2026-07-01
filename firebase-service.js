@@ -8,7 +8,11 @@
     ready: false,
     mode: "local",
     message: "Local browser demo",
+    app: null,
     db: null,
+    auth: null,
+    provider: null,
+    user: null,
     docRef: null,
     modules: null,
     unsubscribe: null
@@ -30,11 +34,55 @@
   }
 
   async function loadFirebaseModules() {
-    const [app, firestore] = await Promise.all([
+    if (state.modules) return state.modules;
+
+    const [app, firestore, auth] = await Promise.all([
       import(`https://www.gstatic.com/firebasejs/${SDK_VERSION}/firebase-app.js`),
-      import(`https://www.gstatic.com/firebasejs/${SDK_VERSION}/firebase-firestore.js`)
+      import(`https://www.gstatic.com/firebasejs/${SDK_VERSION}/firebase-firestore.js`),
+      import(`https://www.gstatic.com/firebasejs/${SDK_VERSION}/firebase-auth.js`)
     ]);
-    return { app, firestore };
+
+    state.modules = { app, firestore, auth };
+    return state.modules;
+  }
+
+  async function ensureFirebase() {
+    if (!hasConfig()) return false;
+    if (state.app && state.db && state.auth && state.docRef) return true;
+
+    const config = configBlock();
+    const collections = config.collections || {};
+    const modules = await loadFirebaseModules();
+    const app = modules.app.getApps().length
+      ? modules.app.getApp()
+      : modules.app.initializeApp(config.firebaseConfig);
+    const db = modules.firestore.getFirestore(app);
+    const auth = modules.auth.getAuth(app);
+    const provider = new modules.auth.GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: "select_account" });
+    auth.useDeviceLanguage?.();
+
+    state.enabled = true;
+    state.mode = "firebase";
+    state.app = app;
+    state.db = db;
+    state.auth = auth;
+    state.provider = provider;
+    state.docRef = modules.firestore.doc(
+      db,
+      collections.stateDocPath || "auditflow/state"
+    );
+
+    return true;
+  }
+
+  function userSummary(user) {
+    if (!user) return null;
+    return {
+      email: user.email || "",
+      name: user.displayName || "",
+      uid: user.uid || ""
+    };
   }
 
   function status() {
@@ -42,12 +90,73 @@
       enabled: state.enabled,
       ready: state.ready,
       mode: state.mode,
-      message: state.message
+      message: state.message,
+      user: userSummary(state.user)
     };
   }
 
+  function waitForAuthReady(auth, timeoutMs = 1500) {
+    if (auth.currentUser) return Promise.resolve(auth.currentUser);
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (user) => {
+        if (settled) return;
+        settled = true;
+        unsubscribe?.();
+        window.clearTimeout(timer);
+        resolve(user || null);
+      };
+
+      const unsubscribe = state.modules.auth.onAuthStateChanged(auth, finish);
+      const timer = window.setTimeout(() => finish(auth.currentUser), timeoutMs);
+    });
+  }
+
+  function describeError(error) {
+    const code = error?.code || "";
+    if (code.includes("permission-denied")) {
+      return "Signed in, but this Google account is not on the AuditFlow access list yet.";
+    }
+    if (code.includes("popup-closed-by-user")) {
+      return "Google sign-in was cancelled before live saving connected.";
+    }
+    if (code.includes("popup-blocked")) {
+      return "The browser blocked the Google sign-in popup. Redirect sign-in will be used instead.";
+    }
+    return `Firebase connection failed: ${error?.message || "Unknown error"}`;
+  }
+
+  async function signIn() {
+    if (!(await ensureFirebase())) {
+      state.message = "Firebase is not configured; live saving is unavailable.";
+      return status();
+    }
+
+    try {
+      const result = await state.modules.auth.signInWithPopup(
+        state.auth,
+        state.provider
+      );
+      state.user = result.user || state.auth.currentUser;
+      state.message = state.user
+        ? `Signed in as ${state.user.email || state.user.displayName || "Google user"}.`
+        : "Signed in with Google.";
+      return status();
+    } catch (error) {
+      if (error?.code?.includes("popup-blocked")) {
+        state.message = describeError(error);
+        await state.modules.auth.signInWithRedirect(state.auth, state.provider);
+        return status();
+      }
+
+      state.message = describeError(error);
+      throw error;
+    }
+  }
+
   async function init({ seedRecords = [], seedReportHistory = [] } = {}) {
-    if (!hasConfig()) {
+    if (!(await ensureFirebase())) {
       state.enabled = false;
       state.ready = false;
       state.mode = "local";
@@ -56,22 +165,27 @@
     }
 
     try {
-      const config = configBlock();
-      const collections = config.collections || {};
-      const modules = await loadFirebaseModules();
-      const app = modules.app.initializeApp(config.firebaseConfig);
-      const db = modules.firestore.getFirestore(app);
-      const docPath = collections.stateDocPath || "auditflow/state";
-      const docRef = modules.firestore.doc(db, docPath);
-      const existing = await modules.firestore.getDoc(docRef);
+      await state.modules.auth.getRedirectResult(state.auth).catch(() => null);
+      const user = await waitForAuthReady(state.auth);
+
+      if (!user) {
+        state.ready = false;
+        state.mode = "signin";
+        state.message = "Sign in with Google to connect live shared data.";
+        return status();
+      }
+
+      state.user = user;
+      const firestore = state.modules.firestore;
+      const existing = await firestore.getDoc(state.docRef);
 
       if (!existing.exists()) {
-        await modules.firestore.setDoc(docRef, {
+        await firestore.setDoc(state.docRef, {
           records: seedRecords,
           reportHistory: seedReportHistory,
-          createdAt: modules.firestore.serverTimestamp(),
-          updatedAt: modules.firestore.serverTimestamp(),
-          updatedBy: "System seed",
+          createdAt: firestore.serverTimestamp(),
+          updatedAt: firestore.serverTimestamp(),
+          updatedBy: user.email || user.displayName || "Initial signed-in user",
           source: "AuditFlow GitHub Pages"
         });
       }
@@ -79,16 +193,12 @@
       state.enabled = true;
       state.ready = true;
       state.mode = "firebase";
-      state.message = "Connected to Firebase Firestore live data.";
-      state.db = db;
-      state.docRef = docRef;
-      state.modules = modules;
+      state.message = `Live data connected as ${user.email || user.displayName || "Google user"}.`;
       return status();
     } catch (error) {
-      state.enabled = false;
       state.ready = false;
-      state.mode = "local";
-      state.message = `Firebase connection failed: ${error.message}`;
+      state.mode = "error";
+      state.message = describeError(error);
       return status();
     }
   }
@@ -122,6 +232,7 @@
     const firestore = state.modules.firestore;
     const role = context.role || "Unknown role";
     const action = context.action || "Updated AuditFlow data";
+    const user = state.user || state.auth?.currentUser;
 
     await firestore.setDoc(
       state.docRef,
@@ -129,7 +240,8 @@
         records,
         reportHistory,
         updatedAt: firestore.serverTimestamp(),
-        updatedBy: role,
+        updatedBy: user?.email || role,
+        updatedByRole: role,
         lastAction: action
       },
       { merge: true }
@@ -138,6 +250,8 @@
     await writeAuditLog({
       action,
       role,
+      userEmail: user?.email || "",
+      userName: user?.displayName || "",
       summary: context.summary || "",
       recordId: context.recordId || "",
       reportMonth: context.reportMonth || ""
@@ -160,6 +274,7 @@
   window.AuditFlowBackend = {
     init,
     status,
+    signIn,
     subscribe,
     saveAll,
     writeAuditLog
