@@ -61,6 +61,7 @@
     const provider = new modules.auth.GoogleAuthProvider();
     provider.setCustomParameters({ prompt: "select_account" });
     auth.useDeviceLanguage?.();
+    await modules.auth.setPersistence(auth, modules.auth.browserLocalPersistence).catch(() => {});
 
     state.enabled = true;
     state.mode = "firebase";
@@ -118,11 +119,17 @@
     if (code.includes("permission-denied")) {
       return "Signed in, but this Google account is not on the AuditFlow access list yet.";
     }
+    if (code.includes("popup-blocked")) {
+      return "Google sign-in popup was blocked. Please allow pop-ups for this dashboard, then try again.";
+    }
     if (code.includes("popup-closed-by-user")) {
-      return "Google sign-in was cancelled before live saving connected.";
+      return "Google sign-in was closed before live saving connected. Please try again.";
     }
     if (code.includes("unauthorized-domain")) {
       return "This website domain is not authorised for Google sign-in yet.";
+    }
+    if (code.includes("operation-not-supported") || code.includes("web-storage-unsupported")) {
+      return "This browser cannot complete Google sign-in here. Please open the shared dashboard link in Chrome or Microsoft Edge.";
     }
     return `Firebase connection failed: ${error?.message || "Unknown error"}`;
   }
@@ -133,9 +140,23 @@
       return status();
     }
 
-    state.message = "Redirecting to Google sign-in...";
-    await state.modules.auth.signInWithRedirect(state.auth, state.provider);
-    return status();
+    try {
+      state.message = "Opening Google sign-in popup...";
+      const result = await state.modules.auth.signInWithPopup(
+        state.auth,
+        state.provider
+      );
+      state.user = result.user || state.auth.currentUser;
+      state.message = state.user
+        ? `Signed in as ${state.user.email || state.user.displayName || "Google user"}.`
+        : "Signed in with Google.";
+      return status();
+    } catch (error) {
+      state.ready = false;
+      state.mode = "signin";
+      state.message = describeError(error);
+      throw error;
+    }
   }
 
   async function init({ seedRecords = [], seedReportHistory = [] } = {}) {
@@ -148,13 +169,12 @@
     }
 
     try {
-      await state.modules.auth.getRedirectResult(state.auth).catch(() => null);
       const user = await waitForAuthReady(state.auth);
 
       if (!user) {
         state.ready = false;
         state.mode = "signin";
-        state.message = "Sign in with Google to connect live shared data.";
+        state.message = "Sign in with Google to connect live shared data. If this opens in the Codex in-app browser, use Chrome or Edge for the final shared link.";
         return status();
       }
 
