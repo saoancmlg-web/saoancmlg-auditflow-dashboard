@@ -4,6 +4,7 @@
   const STORAGE_KEY = "auditflow.records.v1";
   const REPORTS_KEY = "auditflow.reports.v1";
   const RELOAD_FLAG = "auditflow.remoteReload.v1";
+  const EDITING_GRACE_MS = 15000;
 
   const originalSetItem = window.localStorage.setItem.bind(window.localStorage);
   const originalRemoveItem = window.localStorage.removeItem.bind(window.localStorage);
@@ -12,6 +13,8 @@
   let applyingRemote = false;
   let connecting = false;
   let saveTimer = 0;
+  let lastLocalWriteAt = 0;
+  let pendingRemotePayload = null;
 
   const getService = () => window.AuditFlowBackend;
 
@@ -64,6 +67,91 @@
     if (!existing) {
       document.body.appendChild(badge);
     }
+  }
+
+  function writeRemotePayload(payload) {
+    if (!payload) return;
+
+    applyingRemote = true;
+    try {
+      originalSetItem(STORAGE_KEY, JSON.stringify(payload.records || []));
+      originalSetItem(REPORTS_KEY, JSON.stringify(payload.reportHistory || []));
+      originalSetItem(RELOAD_FLAG, String(Date.now()));
+    } finally {
+      applyingRemote = false;
+    }
+  }
+
+  function showRefreshNotice(message) {
+    const existing = document.querySelector("[data-live-refresh-notice]");
+    const notice = existing || document.createElement("section");
+    notice.dataset.liveRefreshNotice = "true";
+    notice.setAttribute("role", "status");
+    notice.setAttribute("aria-live", "polite");
+    notice.style.position = "fixed";
+    notice.style.left = "18px";
+    notice.style.bottom = "64px";
+    notice.style.zIndex = "10002";
+    notice.style.maxWidth = "360px";
+    notice.style.padding = "14px";
+    notice.style.borderRadius = "18px";
+    notice.style.background = "#ffffff";
+    notice.style.border = "1px solid rgba(7, 95, 96, 0.18)";
+    notice.style.boxShadow = "0 18px 50px rgba(6, 40, 74, 0.22)";
+    notice.style.font = "500 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    notice.style.color = "#17324d";
+
+    if (!existing) {
+      const title = document.createElement("div");
+      title.textContent = "Live update available";
+      title.style.fontWeight = "800";
+      title.style.fontSize = "14px";
+      title.style.marginBottom = "4px";
+
+      const text = document.createElement("div");
+      text.dataset.liveRefreshMessage = "true";
+      text.style.marginBottom = "10px";
+      text.style.color = "#516070";
+
+      const actions = document.createElement("div");
+      actions.style.display = "flex";
+      actions.style.gap = "8px";
+      actions.style.flexWrap = "wrap";
+
+      const refreshButton = document.createElement("button");
+      refreshButton.type = "button";
+      refreshButton.dataset.liveRefreshButton = "true";
+      refreshButton.textContent = "Refresh when ready";
+      refreshButton.style.border = "0";
+      refreshButton.style.borderRadius = "999px";
+      refreshButton.style.background = "#0f766e";
+      refreshButton.style.color = "white";
+      refreshButton.style.cursor = "pointer";
+      refreshButton.style.fontWeight = "750";
+      refreshButton.style.padding = "9px 13px";
+      refreshButton.addEventListener("click", () => {
+        writeRemotePayload(pendingRemotePayload);
+        window.location.reload();
+      });
+
+      const dismissButton = document.createElement("button");
+      dismissButton.type = "button";
+      dismissButton.textContent = "Later";
+      dismissButton.style.border = "1px solid rgba(7, 95, 96, 0.16)";
+      dismissButton.style.borderRadius = "999px";
+      dismissButton.style.background = "#f6fbfb";
+      dismissButton.style.color = "#075f60";
+      dismissButton.style.cursor = "pointer";
+      dismissButton.style.fontWeight = "750";
+      dismissButton.style.padding = "9px 13px";
+      dismissButton.addEventListener("click", () => notice.remove());
+
+      actions.append(refreshButton, dismissButton);
+      notice.append(title, text, actions);
+      document.body.appendChild(notice);
+    }
+
+    notice.querySelector("[data-live-refresh-message]").textContent = message;
   }
 
   function removeSignInPanel() {
@@ -143,6 +231,9 @@
   window.localStorage.setItem = function patchedSetItem(key, value) {
     originalSetItem(key, value);
     if (key === STORAGE_KEY || key === REPORTS_KEY) {
+      if (!applyingRemote) {
+        lastLocalWriteAt = Date.now();
+      }
       scheduleRemoteSave(key === STORAGE_KEY ? "Register updated" : "Report history updated");
     }
   };
@@ -150,9 +241,18 @@
   window.localStorage.removeItem = function patchedRemoveItem(key) {
     originalRemoveItem(key);
     if (key === STORAGE_KEY || key === REPORTS_KEY) {
+      if (!applyingRemote) {
+        lastLocalWriteAt = Date.now();
+      }
       scheduleRemoteSave("Sample data restored");
     }
   };
+
+  function isUserActivelyEditing() {
+    const active = document.activeElement;
+    const focusedField = active?.matches?.("input, textarea, select, [contenteditable='true'], [contenteditable='']");
+    return Boolean(focusedField) || Date.now() - lastLocalWriteAt < EDITING_GRACE_MS;
+  }
 
   function applyRemoteState(payload) {
     if (!payload || !liveReady) return;
@@ -162,16 +262,22 @@
     const currentRecordText = window.localStorage.getItem(STORAGE_KEY) || "";
     const currentReportText = window.localStorage.getItem(REPORTS_KEY) || "";
 
-    if (nextRecords === currentRecordText && nextReports === currentReportText) return;
+    if (nextRecords === currentRecordText && nextReports === currentReportText) {
+      pendingRemotePayload = null;
+      document.querySelector("[data-live-refresh-notice]")?.remove();
+      return;
+    }
 
-    applyingRemote = true;
-    originalSetItem(STORAGE_KEY, nextRecords);
-    originalSetItem(REPORTS_KEY, nextReports);
-    originalSetItem(RELOAD_FLAG, String(Date.now()));
-    applyingRemote = false;
+    pendingRemotePayload = payload;
 
-    showLiveBadge("Live update received - refreshing", "live");
-    window.setTimeout(() => window.location.reload(), 600);
+    if (isUserActivelyEditing()) {
+      showLiveBadge("Live update waiting", "local");
+      showRefreshNotice("Another officer saved an update. Finish your current entry first, then refresh when ready to view the latest shared data.");
+      return;
+    }
+
+    showLiveBadge("Live update available", "live");
+    showRefreshNotice("A live update was received. Refresh when ready to view the latest shared data.");
   }
 
   async function connectLiveData() {
